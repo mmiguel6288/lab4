@@ -13,9 +13,9 @@
 # information you'd like us to know, please add it at the end of the file.
 
 # Partner 1
-Name: 
-Student ID: 
-Email: 
+Name: Peter Chang
+Student ID: 703555852
+Email: Tokenekie@ucla.edu
 
 # Partner 2 (if you're working in a team)
 Name: 
