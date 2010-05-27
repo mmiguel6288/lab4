@@ -18,9 +18,9 @@ Student ID: 703555852
 Email: Tokenekie@ucla.edu
 
 # Partner 2 (if you're working in a team)
-Name: 
-Student ID: 
-Email: 
+Name: Matthew Miguel
+Student ID: 903675486
+Email: mmiguel6288@gmail.com
 
 # EXERCISE 1: What method you used to make your peer download and upload
 #    files in parallel?  (~1-3 sentences)
