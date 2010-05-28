@@ -22,6 +22,7 @@
 #include <limits.h>
 #include "md5.h"
 #include "osp2p.h"
+#include <sys/wait.h>
 
 int evil_mode;				// 1 iff this peer should behave badly
 
