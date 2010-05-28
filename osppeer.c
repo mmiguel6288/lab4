@@ -24,6 +24,8 @@
 #include "osp2p.h"
 #include <sys/wait.h>
 
+#define MAX_PROCESSES 5
+static unsigned int process_count;
 int evil_mode;				// 1 iff this peer should behave badly
 
 static struct in_addr listen_addr;	// Define listening endpoint
@@ -694,6 +696,7 @@ int main(int argc, char *argv[])
 	struct passwd *pwent;
 
 	// Default tracker is read.cs.ucla.edu
+	process_count = 0;
 	osp2p_sscanf("131.179.80.139:11111", "%I:%d",
 		     &tracker_addr, &tracker_port);
 	if ((pwent = getpwuid(getuid()))) {
@@ -759,23 +762,36 @@ int main(int argc, char *argv[])
    pid_t pid;
 	for (; argc > 1; argc--, argv++) {
 		if ((t = start_download(tracker_task, argv[1]))) {
-         pid = fork();
-         if (pid == 0) {
-			   task_download(t, tracker_task);
-            return 0;
-         }
-      }
-   }
-
-	//Get rid of 'em zombies
-	int status;
-	waitpid(-1,&status, WNOHANG);
-
-   /* OLD CODE BELOW
+			if(process_count < MAX_PROCESSES){
+         	pid = fork();
+         	if (pid == 0) {
+			 	  task_download(t, tracker_task);
+          	  exit(0);
+        	 	}
+				if (pid == -1){
+					//Fork failed
+					//Print some error
+					error("Cannot fork!\n");
+				}
+				else{
+					// Fork was successful
+					process_count++;
+				}
+			}
+			else{
+				//Wait on a process:
+				//TODO: Verify from Keith that this does not qualify as busy waiting
+				int status;
+				waitpid(-1,&status,0);
+				process_count--;
+			}
+		}
+	}
+/*    OLD CODE BELOW
 	for (; argc > 1; argc--, argv++)
 		if ((t = start_download(tracker_task, argv[1])))
 			task_download(t, tracker_task);
-   */
+*/
 
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task)))
