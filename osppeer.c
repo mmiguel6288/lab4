@@ -765,6 +765,11 @@ int main(int argc, char *argv[])
          }
       }
    }
+
+	//Get rid of 'em zombies
+	int status;
+	waitpid(-1,&status, WNOHANG);
+
    /* OLD CODE BELOW
 	for (; argc > 1; argc--, argv++)
 		if ((t = start_download(tracker_task, argv[1])))
