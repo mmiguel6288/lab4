@@ -674,6 +674,10 @@ static void task_upload(task_t *t)
 	}
 
 	assert(t->head == 0);
+   if ((t->tail - strlen("GET  OSP2P\n")) > FILENAMESIZ) {
+      error("* Peer filename buffer overrun error");
+      goto exit;
+   }
 	if (osp2p_snscanf(t->buf, t->tail, "GET %s OSP2P\n", t->filename) < 0) {
 		error("* Odd request %.*s\n", t->tail, t->buf);
 		goto exit;
