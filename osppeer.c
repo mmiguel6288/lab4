@@ -363,7 +363,6 @@ task_t *start_tracker(struct in_addr addr, int port)
 	}
 
 	// Collect the tracker's greeting.
-	//TODO: Mutual Exclusion
 	messagepos = read_tracker_response(tracker_task);
 	message("* Tracker's greeting:\n%s", &tracker_task->buf[messagepos]);
 
@@ -419,7 +418,6 @@ static void register_files(task_t *tracker_task, const char *myalias)
 	// Register address with the tracker.
 	osp2p_writef(tracker_task->peer_fd, "ADDR %s %I:%d\n",
 		     myalias, listen_addr, listen_port);
-	//TODO: Mutual Exclusion
 	messagepos = read_tracker_response(tracker_task);
 	message("* Tracker's response to our IP address registration:\n%s",
 		&tracker_task->buf[messagepos]);
@@ -445,7 +443,6 @@ static void register_files(task_t *tracker_task, const char *myalias)
 			continue;
 
 		osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", ent->d_name);
-		//TODO: Mutual Exclusion
 		messagepos = read_tracker_response(tracker_task);
 		if (tracker_task->buf[messagepos] != '2')
 			error("* Tracker error message while registering '%s':\n%s",
@@ -472,8 +469,6 @@ static peer_t *parse_peer(const char *s, size_t len)
 	free(p);
 	return NULL;
 }
-
-
 // start_download(tracker_task, filename)
 //	Return a TASK_DOWNLOAD task for downloading 'filename' from peers.
 //	Contacts the tracker for a list of peers that have 'filename',
@@ -486,13 +481,15 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	size_t messagepos;
 	assert(tracker_task->type == TASK_TRACKER);
 
+	if(strlen(filename) > FILENAMESIZ){
+		error("File name too long\n");
+		goto exit;
+	}
+
 	message("* Finding peers for '%s'\n", filename);
 
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
-	//TODO:Mutual Exclusion
 	messagepos = read_tracker_response(tracker_task);
-
-
 
 	if (tracker_task->buf[messagepos] != '2') {
 		error("* Tracker error message while requesting '%s':\n%s",
@@ -610,7 +607,6 @@ static void task_download(task_t *t, task_t *tracker_task)
 		if (strcmp(t->filename, t->disk_filename) == 0) {
 			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
 				     t->filename);
-			//TODO: Mutual Exclusion
 			(void) read_tracker_response(tracker_task);
 		}
 		task_free(t);
