@@ -98,10 +98,4 @@ int osp2p_sscanf(const char *str, const char *format, ...);
 //	like osp2p_sscanf.  However, 'str' is NOT null-terminated; it is
 //      exactly 'len' characters long.
 int osp2p_snscanf(const char *str, size_t len, const char *format, ...);
-
-typedef struct thread_data_struct{
-	task_t * t;
-	task_t * tracker_task;
-	pthread_t * thread;
-} thread_data;
 #endif

@@ -22,11 +22,8 @@
 #include <limits.h>
 #include "md5.h"
 #include "osp2p.h"
-#include <pthreads.h>
+#include <pthread.h>
 
-#define MAX_THREADS 15
-static unsigned int thread_count;
-static thread_data threads[MAX_THREADS];
 int evil_mode;				// 1 iff this peer should behave badly
 
 static struct in_addr listen_addr;	// Define listening endpoint
@@ -79,6 +76,25 @@ typedef struct task {
 					// misbehaves.
 } task_t;
 
+//Parallel Tasking Structs
+#define MAX_THREADS 15
+#define MAX_PENDING_TASKS 200
+typedef struct task_description_struct{
+	tasktype_t type;
+	task_t * tracker_task;
+	task_t * t;
+	struct task_description_struct * next;
+} task_description_t;
+typedef struct thread_data_struct{
+	task_description_t * td;
+	pthread_t thread;
+} thread_data_t;
+static unsigned int thread_count;
+static unsigned int pending_task_count;
+static thread_data_t threads[MAX_THREADS];
+static task_description_t * pending_tasks_head;
+static task_description_t * pending_tasks_tail;
+static pthread_mutex_t task_mutex;
 
 // task_new(type)
 //	Create and return a new task of type 'type'.
@@ -684,6 +700,7 @@ static void task_upload(task_t *t)
 	task_free(t);
 }
 
+int do_task(task_description_t * td);
 
 // main(argc, argv)
 //	The main loop!
@@ -698,14 +715,18 @@ int main(int argc, char *argv[])
 
 	//Thread attributes struct
 	pthread_attr_t attr;
-	//Initialize thread tasks to NULL
+	//Initialize threading variables
 	int i;
 	for(i=0;i<MAX_THREADS;i++){
-		threads[i].thread = NULL;
+		threads[i].td = NULL;
 	}
+	thread_count = 0;
+	pending_task_count = 0;
+	pending_tasks_head = NULL;
+	pending_tasks_tail = NULL;
+	pthread_mutex_init(&task_mutex,NULL);
 
 	// Default tracker is read.cs.ucla.edu
-	process_count = 0;
 	osp2p_sscanf("131.179.80.139:11111", "%I:%d",
 		     &tracker_addr, &tracker_port);
 	if ((pwent = getpwuid(getuid()))) {
@@ -768,26 +789,18 @@ int main(int argc, char *argv[])
    //    this section.
 
 	// First, download files named on command line.
+	task_description_t * td;
 	for (; argc > 1; argc--, argv++) {
 		if ((t = start_download(tracker_task, argv[1]))) {
-			//
-			//Store arguments in thread_tasks
-			pthread_attr_init(&attr);
-			//Thread is not joinable
-			pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
-			//Continually search for threads until freed
-			for(i=0;i<MAX_THREADS && i=0;i++){
-				if(threads[i].thread == NULL){
-					//Store "thread-safe" arguments
-					threads[i].t = t;
-					threads[i].tracker_task = tracker_task;
-					if(pthread_create(&(threads[i].thread),&attr,thread_download,i)){
-						//If return value is non-zero, there is an error
-						error("Could not create thread\n");
-					}
+	         td = (task_description_t *) malloc(sizeof(task_description_t));
+				if(td == NULL){
+					error("Could not allocate data for task description\n");
 					break;
 				}
-			}
+            td->type = TASK_DOWNLOAD;
+            td->tracker_task = tracker_task;
+            td->t = t; 
+				do_task(td);
 		}
 	}
 /*    OLD CODE BELOW
@@ -798,30 +811,125 @@ int main(int argc, char *argv[])
 
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task))){
-		pthread_attr_init(&attr);
-		//Thread is not joinable
-		pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
-		for(i=0;i<MAX_THREADS && i=0;i++){
-			if(threads[i].thread == NULL){
-			//Store "safe" arguments
-			threads[i].t = t;
-			threads[i].tracker_task = tracker_task;
-			if(pthread_create(&(threads[i].thread),&attr,thread_download,i)){
-				//If return value is non-zero, there is an error
-				error("Could not create thread\n");
-			}
-			break;
-			}
-		}
+	         td = (task_description_t *) malloc(sizeof(task_description_t));
+            if(td == NULL){
+               error("Could not allocate data for task description\n");
+               break;
+            }
+            td->type = TASK_UPLOAD;
+            td->tracker_task = tracker_task;
+            td->t = t;
+            do_task(td);
 	}
 	
 	return 0;
 }
-void * thread_download(void * i){
-	task_download(threads[i].t,threads[i].tracker_task);
-	pthread_exit(NULL);
+
+void *thread_upload(void *i);
+void *thread_download(void *i);
+void end_thread(unsigned int i){
+	//Free task description
+	free(threads[i].td);
+  //Look for other tasks first
+   pthread_mutex_lock(&task_mutex);
+   if(pending_task_count > 0){
+      if(pending_task_count == 1){
+         threads[i].td = pending_tasks_head;
+         pending_tasks_head = pending_tasks_tail = NULL;
+         pending_task_count = 0;
+      }
+      else{
+         threads[i].td = pending_tasks_head;
+         pending_tasks_head = pending_tasks_head->next;
+         pending_task_count--;
+      }
+		//Execute task
+      void *(*start_routine)(void*);
+      switch(threads[i].td->type){
+         case TASK_DOWNLOAD:
+            start_routine = thread_download;
+         break;
+         case TASK_UPLOAD:
+            start_routine = thread_upload;
+         break;
+			default:
+			break;
+      }
+      if(pthread_create(&threads[i].thread,NULL,start_routine,(void *) i)){
+        //If return value is non-zero, there is an error
+        error("Could not create thread\n");
+      }
+   }
+	else{
+		//No pending tasks
+   	threads[i].td = NULL;
+   	thread_count--;
+	}
+  	pthread_mutex_unlock(&task_mutex);
+   pthread_exit(NULL);
 }
-void * thread_upload(void * i){
-	task_upload(threads[i].t);
-	pthread_exit(NULL);
+
+void *thread_download(void * i){
+	task_description_t * td = threads[(unsigned int) i].td;
+	task_download(td->t,td->tracker_task);
+	end_thread((unsigned int) i);
+	return 0;
+}
+void *thread_upload(void * i){
+	task_description_t * td = threads[(unsigned int) i].td;
+	task_upload(td->t);
+	end_thread((unsigned int) i);
+	return 0;
+}
+
+int do_task(task_description_t * td){
+	int i;
+	//Acquire mutex
+	pthread_mutex_lock(&task_mutex);
+	//If we can make a new thread
+	if (thread_count < MAX_THREADS){
+		//Search for a thread spot
+		for(i=0;i<MAX_THREADS;i++){
+			if(threads[i].td == NULL){
+				threads[i].td = td;
+				thread_count++;
+				void *(*start_routine)(void*);
+				switch(td->type){
+					case TASK_DOWNLOAD:
+						start_routine = thread_download;
+					break;
+					case TASK_UPLOAD:
+						start_routine = thread_upload;
+					break;
+					default:
+					break;
+				}
+				if(pthread_create(&threads[i].thread,NULL,start_routine,(void *) i)){
+	           //If return value is non-zero, there is an error
+              error("Could not create thread\n");
+   				pthread_mutex_unlock(&task_mutex);
+				  return -1;
+            }
+				break;
+			}
+		}	
+	}
+	else{ //No free thread spots
+		if(pending_task_count < MAX_PENDING_TASKS){
+			//Add to queue
+			if(pending_task_count == 0){
+				pending_tasks_head = pending_tasks_tail = td;
+			}
+			else{
+				pending_tasks_tail = (pending_tasks_tail->next = td);
+			}	
+			pending_task_count++;
+		}
+		else{
+			error("Maximum number of pending tasks reached. Request will not be processed.\n");
+		}
+	}
+	//Release mutex
+	pthread_mutex_unlock(&task_mutex);			
+	return 0;
 }
