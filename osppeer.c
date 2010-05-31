@@ -808,7 +808,13 @@ int main(int argc, char *argv[])
 					break;
 				}
             td->type = TASK_DOWNLOAD;
-            td->tracker_task = tracker_task;
+				td->tracker_task = (task_t *) malloc(sizeof(task_t));
+				if(td->tracker_task == NULL){
+					error("Could not allocate data for task tracker\n");
+					free(td);
+					break;
+				}
+				memcpy(td->tracker_task,tracker_task,sizeof(task_t));
             td->t = t; 
 				do_task(td);
 		}
@@ -827,7 +833,7 @@ int main(int argc, char *argv[])
                break;
             }
             td->type = TASK_UPLOAD;
-            td->tracker_task = tracker_task;
+				td->tracker_task = NULL;
             td->t = t;
             do_task(td);
 	}
@@ -839,10 +845,10 @@ void *thread_upload(void *i);
 void *thread_download(void *i);
 void end_thread(unsigned int i){
 	//Free task description
+	free(threads[i].td->tracker_task);
 	free(threads[i].td);
   //Look for other tasks first
    pthread_mutex_lock(&task_mutex);
-	message("end thread acquires lock\n");
    if(pending_task_count > 0){
       if(pending_task_count == 1){
          threads[i].td = pending_tasks_head;
@@ -877,7 +883,6 @@ void end_thread(unsigned int i){
    	thread_count--;
 	}
   	pthread_mutex_unlock(&task_mutex);
-	message("end thread releases lock\n");
    pthread_exit(NULL);
 }
 
@@ -897,9 +902,7 @@ void *thread_upload(void * i){
 int do_task(task_description_t * td){
 	int i;
 	//Acquire mutex
-	message("do task is trying to acquire lock\n");
 	pthread_mutex_lock(&task_mutex);
-	message("do task acquires lock\n");
 	//If we can make a new thread
 	if (thread_count < MAX_THREADS){
 		//Search for a thread spot
@@ -947,6 +950,5 @@ int do_task(task_description_t * td){
 	}
 	//Release mutex
 	pthread_mutex_unlock(&task_mutex);			
-	message("do task releases lock\n");
 	return 0;
 }
