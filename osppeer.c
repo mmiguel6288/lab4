@@ -363,6 +363,7 @@ task_t *start_tracker(struct in_addr addr, int port)
 	}
 
 	// Collect the tracker's greeting.
+	//TODO: Mutual Exclusion
 	messagepos = read_tracker_response(tracker_task);
 	message("* Tracker's greeting:\n%s", &tracker_task->buf[messagepos]);
 
@@ -418,6 +419,7 @@ static void register_files(task_t *tracker_task, const char *myalias)
 	// Register address with the tracker.
 	osp2p_writef(tracker_task->peer_fd, "ADDR %s %I:%d\n",
 		     myalias, listen_addr, listen_port);
+	//TODO: Mutual Exclusion
 	messagepos = read_tracker_response(tracker_task);
 	message("* Tracker's response to our IP address registration:\n%s",
 		&tracker_task->buf[messagepos]);
@@ -443,6 +445,7 @@ static void register_files(task_t *tracker_task, const char *myalias)
 			continue;
 
 		osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", ent->d_name);
+		//TODO: Mutual Exclusion
 		messagepos = read_tracker_response(tracker_task);
 		if (tracker_task->buf[messagepos] != '2')
 			error("* Tracker error message while registering '%s':\n%s",
@@ -486,18 +489,24 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	message("* Finding peers for '%s'\n", filename);
 
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
+	//TODO:Mutual Exclusion
 	messagepos = read_tracker_response(tracker_task);
+
+
+
 	if (tracker_task->buf[messagepos] != '2') {
 		error("* Tracker error message while requesting '%s':\n%s",
 		      filename, &tracker_task->buf[messagepos]);
 		goto exit;
 	}
 
+
 	if (!(t = task_new(TASK_DOWNLOAD))) {
 		error("* Error while allocating task");
 		goto exit;
 	}
 	strcpy(t->filename, filename);
+
 	
 	// add peers
 	s1 = tracker_task->buf;
@@ -601,6 +610,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 		if (strcmp(t->filename, t->disk_filename) == 0) {
 			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
 				     t->filename);
+			//TODO: Mutual Exclusion
 			(void) read_tracker_response(tracker_task);
 		}
 		task_free(t);
@@ -832,6 +842,7 @@ void end_thread(unsigned int i){
 	free(threads[i].td);
   //Look for other tasks first
    pthread_mutex_lock(&task_mutex);
+	message("end thread acquires lock\n");
    if(pending_task_count > 0){
       if(pending_task_count == 1){
          threads[i].td = pending_tasks_head;
@@ -866,6 +877,7 @@ void end_thread(unsigned int i){
    	thread_count--;
 	}
   	pthread_mutex_unlock(&task_mutex);
+	message("end thread releases lock\n");
    pthread_exit(NULL);
 }
 
@@ -885,7 +897,9 @@ void *thread_upload(void * i){
 int do_task(task_description_t * td){
 	int i;
 	//Acquire mutex
+	message("do task is trying to acquire lock\n");
 	pthread_mutex_lock(&task_mutex);
+	message("do task acquires lock\n");
 	//If we can make a new thread
 	if (thread_count < MAX_THREADS){
 		//Search for a thread spot
@@ -927,9 +941,12 @@ int do_task(task_description_t * td){
 		}
 		else{
 			error("Maximum number of pending tasks reached. Request will not be processed.\n");
+	pthread_mutex_unlock(&task_mutex);			
+	return -2;
 		}
 	}
 	//Release mutex
 	pthread_mutex_unlock(&task_mutex);			
+	message("do task releases lock\n");
 	return 0;
 }
