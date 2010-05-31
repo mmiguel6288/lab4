@@ -22,10 +22,11 @@
 #include <limits.h>
 #include "md5.h"
 #include "osp2p.h"
-#include <sys/wait.h>
+#include <pthreads.h>
 
-#define MAX_PROCESSES 5
-static unsigned int process_count;
+#define MAX_THREADS 15
+static unsigned int thread_count;
+static thread_data threads[MAX_THREADS];
 int evil_mode;				// 1 iff this peer should behave badly
 
 static struct in_addr listen_addr;	// Define listening endpoint
@@ -695,6 +696,14 @@ int main(int argc, char *argv[])
 	const char *myalias;
 	struct passwd *pwent;
 
+	//Thread attributes struct
+	pthread_attr_t attr;
+	//Initialize thread tasks to NULL
+	int i;
+	for(i=0;i<MAX_THREADS;i++){
+		threads[i].thread = NULL;
+	}
+
 	// Default tracker is read.cs.ucla.edu
 	process_count = 0;
 	osp2p_sscanf("131.179.80.139:11111", "%I:%d",
@@ -759,31 +768,25 @@ int main(int argc, char *argv[])
    //    this section.
 
 	// First, download files named on command line.
-   pid_t pid;
 	for (; argc > 1; argc--, argv++) {
 		if ((t = start_download(tracker_task, argv[1]))) {
-			if(process_count < MAX_PROCESSES){
-         	pid = fork();
-         	if (pid == 0) {
-			 	  task_download(t, tracker_task);
-          	  exit(0);
-        	 	}
-				if (pid == -1){
-					//Fork failed
-					//Print some error
-					error("Cannot fork!\n");
+			//
+			//Store arguments in thread_tasks
+			pthread_attr_init(&attr);
+			//Thread is not joinable
+			pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+			//Continually search for threads until freed
+			for(i=0;i<MAX_THREADS && i=0;i++){
+				if(threads[i].thread == NULL){
+					//Store "thread-safe" arguments
+					threads[i].t = t;
+					threads[i].tracker_task = tracker_task;
+					if(pthread_create(&(threads[i].thread),&attr,thread_download,i)){
+						//If return value is non-zero, there is an error
+						error("Could not create thread\n");
+					}
+					break;
 				}
-				else{
-					// Fork was successful
-					process_count++;
-				}
-			}
-			else{
-				//Wait on a process:
-				//TODO: Verify from Keith that this does not qualify as busy waiting
-				int status;
-				waitpid(-1,&status,0);
-				process_count--;
 			}
 		}
 	}
@@ -794,8 +797,31 @@ int main(int argc, char *argv[])
 */
 
 	// Then accept connections from other peers and upload files to them!
-	while ((t = task_listen(listen_task)))
-		task_upload(t);
+	while ((t = task_listen(listen_task))){
+		pthread_attr_init(&attr);
+		//Thread is not joinable
+		pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+		for(i=0;i<MAX_THREADS && i=0;i++){
+			if(threads[i].thread == NULL){
+			//Store "safe" arguments
+			threads[i].t = t;
+			threads[i].tracker_task = tracker_task;
+			if(pthread_create(&(threads[i].thread),&attr,thread_download,i)){
+				//If return value is non-zero, there is an error
+				error("Could not create thread\n");
+			}
+			break;
+			}
+		}
+	}
 	
 	return 0;
+}
+void * thread_download(void * i){
+	task_download(threads[i].t,threads[i].tracker_task);
+	pthread_exit(NULL);
+}
+void * thread_upload(void * i){
+	task_upload(threads[i].t);
+	pthread_exit(NULL);
 }
