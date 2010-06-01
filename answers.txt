@@ -25,11 +25,38 @@ Email: mmiguel6288@gmail.com
 # EXERCISE 1: What method you used to make your peer download and upload
 #    files in parallel?  (~1-3 sentences)
 
+1) We used the pthreads.h library to implement multithreaded parallelization.
+   There are predefined constants regarding the maximum number of threads that
+   can be run at one time, and the maximum number of requests that can be 
+   queued up in the case all threads are currently in use.
+
 # EXERCISE 2A: What conditions did you find and fix that would have
 #    triggered a buffer overrun bug?  (~1-3 sentences each)
 
+1) Upload: Filename Overflow
+
+      We fixed the buffer overrun bug regarding large filename requests from 
+   bad peers. A bad peer could have sent our client a GET request containing a 
+   filename larger FILENAMESIZ characters, causing t->filename buffer to
+   overflow. To fix this problem, we calculated the length of the filename
+   within the RPC request to determine if there would be an overflow or not,
+   terminating the connection if it would overflow.
+   
+
 # EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
 #    each)
+
+1) Download: Infinite File Size
+
+2) Upload: Restricted Files
+
+3) Upload: Infinite File Requests
+
+4) Hanging Peers
+
+5) File Integrity
+   
+      See Extra Credit section.
 
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
@@ -37,4 +64,8 @@ Email: mmiguel6288@gmail.com
 # Extra credit problems
 #Extra credit problem: none
 
+1) File Integrity:
+
 # Add any other information you'd like us to know below this line.
+
+1) Performance issues regarding forking:

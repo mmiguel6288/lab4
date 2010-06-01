@@ -24,6 +24,8 @@
 #include "osp2p.h"
 #include <pthread.h>
 
+#define MAXFILESIZ 65536
+
 int evil_mode;				// 1 iff this peer should behave badly
 
 static struct in_addr listen_addr;	// Define listening endpoint
@@ -590,6 +592,13 @@ static void task_download(task_t *t, task_t *tracker_task)
 		} else if (ret == TBUF_END && t->head == t->tail)
 			/* End of file */
 			break;
+      
+      // INFINITE DATA: Prevents downloading forever
+      if (t->total_written > MAXFILESIZ) {
+         error("* File too large");
+         goto try_again;
+      }
+      printf("TOTAL WRITTEN = %d\n", t->total_written);
 
 		ret = write_from_taskbuf(t->disk_fd, t);
 		if (ret == TBUF_ERROR) {
@@ -657,9 +666,16 @@ static task_t *task_listen(task_t *listen_task)
 //	the requested file.
 static void task_upload(task_t *t)
 {
+	DIR *dir;
+	struct dirent *ent;
+	struct stat s;
+   int exists = 0;
+
 	assert(t->type == TASK_UPLOAD);
 	// First, read the request from the peer.
+   // TIMEOUT: TODO: Implement thread timeout for unresponsive peers
 	while (1) {
+      printf("READING CONNECTION RPC\n");
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Cannot read from connection");
@@ -669,6 +685,7 @@ static void task_upload(task_t *t)
 			break;
 	}
 
+   // BUFFER OVERRRUN: Filename Size
 	assert(t->head == 0);
    if ((t->tail - strlen("GET  OSP2P\n")) > FILENAMESIZ) {
       error("* Peer filename buffer overrun error");
@@ -679,6 +696,32 @@ static void task_upload(task_t *t)
 		goto exit;
 	}
 	t->head = t->tail = 0;
+
+   // BAD FILES: Restricting uploads to files in current directory
+	if ((dir = opendir(".")) == NULL)
+		die("open directory: %s", strerror(errno));
+   while ((ent = readdir(dir)) != NULL) {
+		int namelen = strlen(ent->d_name);
+		
+		// don't depend on unreliable parts of the dirent structure
+		// and only report regular files.  Do not change these lines.
+		if (stat(ent->d_name, &s) < 0 || !S_ISREG(s.st_mode)
+		    || (namelen > 2 && ent->d_name[namelen - 2] == '.'
+			&& (ent->d_name[namelen - 1] == 'c'
+			    || ent->d_name[namelen - 1] == 'h'))
+		    || (namelen > 1 && ent->d_name[namelen - 1] == '~'))
+			continue;
+
+      if (strcmp(ent->d_name, t->filename) == 0) {
+         exists = 1;
+         break;
+      }
+	}
+   closedir(dir);
+   if (!exists) {
+      error("* Invalid file %s", t->filename);
+      goto exit;
+   }
 
 	t->disk_fd = open(t->filename, O_RDONLY);
 	if (t->disk_fd == -1) {
@@ -914,14 +957,14 @@ int do_task(task_description_t * td){
 				switch(td->type){
 					case TASK_DOWNLOAD:
 						start_routine = thread_download;
-					break;
+					   break;
 					case TASK_UPLOAD:
 						start_routine = thread_upload;
-					break;
+					   break;
 					default:
-					break;
+					   break;
 				}
-				if(pthread_create(&threads[i].thread,NULL,start_routine,(void *) i)){
+				if(pthread_create(&threads[i].thread,NULL,start_routine,(void *)i)){
 	           //If return value is non-zero, there is an error
               error("Could not create thread\n");
    				pthread_mutex_unlock(&task_mutex);
