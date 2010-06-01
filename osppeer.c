@@ -185,6 +185,15 @@ taskbufresult_t read_to_taskbuf(int fd, task_t *t)
 	unsigned headpos = (t->head % TASKBUFSIZ);
 	unsigned tailpos = (t->tail % TASKBUFSIZ);
 	ssize_t amt;
+   fd_set rfds;
+   struct timeval tv;
+
+   //FD_ZERO(&rfds);
+  // FD_SET(fd, &rfds);
+   //tv.tv_sec = 10;
+   //tv.tv_usec = 0;
+   //if (select(1, &rfds, NULL, NULL, &tv) == 0)
+    //  return TBUF_ERROR;
 
 	if (t->head == t->tail || headpos < tailpos)
 		amt = read(fd, &t->buf[tailpos], TASKBUFSIZ - tailpos);
@@ -594,7 +603,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 			break;
       
       // INFINITE DATA: Prevents downloading forever
-      if (t->total_written > MAXFILESIZ) {
+      if (t->total_written + (t->tail - t->head) > MAXFILESIZ) {
          error("* File too large");
          goto try_again;
       }
@@ -675,7 +684,7 @@ static void task_upload(task_t *t)
 	// First, read the request from the peer.
    // TIMEOUT: TODO: Implement thread timeout for unresponsive peers
 	while (1) {
-      printf("READING CONNECTION RPC\n");
+      //printf("READING CONNECTION RPC\n");
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Cannot read from connection");
@@ -862,11 +871,6 @@ int main(int argc, char *argv[])
 				do_task(td);
 		}
 	}
-/*    OLD CODE BELOW
-	for (; argc > 1; argc--, argv++)
-		if ((t = start_download(tracker_task, argv[1])))
-			task_download(t, tracker_task);
-*/
 
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task))){
@@ -886,7 +890,7 @@ int main(int argc, char *argv[])
 
 void *thread_upload(void *i);
 void *thread_download(void *i);
-void end_thread(unsigned int i){
+void end_thread(uint32_t i){
 	//Free task description
 	free(threads[i].td->tracker_task);
 	free(threads[i].td);
@@ -930,20 +934,20 @@ void end_thread(unsigned int i){
 }
 
 void *thread_download(void * i){
-	task_description_t * td = threads[(unsigned int) i].td;
+	task_description_t * td = threads[(uint32_t) i].td;
 	task_download(td->t,td->tracker_task);
-	end_thread((unsigned int) i);
+	end_thread((uint32_t) i);
 	return 0;
 }
 void *thread_upload(void * i){
-	task_description_t * td = threads[(unsigned int) i].td;
+	task_description_t * td = threads[(uint32_t) i].td;
 	task_upload(td->t);
-	end_thread((unsigned int) i);
+	end_thread((uint32_t) i);
 	return 0;
 }
 
 int do_task(task_description_t * td){
-	int i;
+	uint32_t i;
 	//Acquire mutex
 	pthread_mutex_lock(&task_mutex);
 	//If we can make a new thread
@@ -973,22 +977,20 @@ int do_task(task_description_t * td){
 				break;
 			}
 		}	
-	}
-	else{ //No free thread spots
+	} else { //No free thread spots
 		if(pending_task_count < MAX_PENDING_TASKS){
 			//Add to queue
-			if(pending_task_count == 0){
+			if(pending_task_count == 0) {
 				pending_tasks_head = pending_tasks_tail = td;
-			}
-			else{
+			} else {
 				pending_tasks_tail = (pending_tasks_tail->next = td);
 			}	
 			pending_task_count++;
-		}
-		else{
-			error("Maximum number of pending tasks reached. Request will not be processed.\n");
-	pthread_mutex_unlock(&task_mutex);			
-	return -2;
+		} else {
+			error("Maximum number of pending tasks reached."
+               "Request will not be processed.\n");
+	      pthread_mutex_unlock(&task_mutex);			
+	      return -2;
 		}
 	}
 	//Release mutex
