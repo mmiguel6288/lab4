@@ -29,7 +29,18 @@ int evil_mode;				// 1 iff this peer should behave badly
 static struct in_addr listen_addr;	// Define listening endpoint
 static int listen_port;
 
+//TODO: Checksums
+//Idea for checksums:
+//When a file is introduced to the tracker, the checksum is recorded by the tracker.
+//Before download, compute the checksum and compare to the trusted value in the tracker. If the checksums differ, then do not downloa.
 
+//TODO: make run-bad, don't run out of memory or file descriptors
+
+//TODO: make run-popular closes prematurely, we still need to fix this bug
+
+//TODO: evil mode, do a lot of evil things, buffer overflow, leave directory, etc.
+
+//TODO: denial of service: protect against, and cause
 /*****************************************************************************
  * TASK STRUCTURE
  * Holds all information relevant for a peer or tracker connection, including
@@ -95,6 +106,10 @@ static thread_data_t threads[MAX_THREADS];
 static task_description_t * pending_tasks_head;
 static task_description_t * pending_tasks_tail;
 static pthread_mutex_t task_mutex;
+
+
+//Checksum variable
+md5_state_t pms;
 
 // task_new(type)
 //	Create and return a new task of type 'type'.
@@ -442,6 +457,7 @@ static void register_files(task_t *tracker_task, const char *myalias)
 		    || (namelen > 1 && ent->d_name[namelen - 1] == '~'))
 			continue;
 
+		//TODO: Calculate check sum and place after file name	
 		osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", ent->d_name);
 		messagepos = read_tracker_response(tracker_task);
 		if (tracker_task->buf[messagepos] != '2')
@@ -490,6 +506,8 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
 	messagepos = read_tracker_response(tracker_task);
+
+	//TODO: Save checksum with command MD5SUM <file> to tracker
 
 	if (tracker_task->buf[messagepos] != '2') {
 		error("* Tracker error message while requesting '%s':\n%s",
@@ -604,6 +622,7 @@ static void task_download(task_t *t, task_t *tracker_task)
 			t->disk_filename, (unsigned long) t->total_written);
 		// Inform the tracker that we now have the file,
 		// and can serve it to others!  (But ignore tracker errors.)
+		//TODO: Compare downloaded file to saved checksum
 		if (strcmp(t->filename, t->disk_filename) == 0) {
 			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
 				     t->filename);
