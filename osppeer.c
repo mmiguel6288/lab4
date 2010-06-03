@@ -90,7 +90,7 @@ typedef struct task {
 } task_t;
 
 //Parallel Tasking Structs
-#define MAX_THREADS 15
+#define MAX_THREADS 3 // Should be low to reduce context switching
 #define MAX_PENDING_TASKS 200
 typedef struct task_description_struct{
 	tasktype_t type;
@@ -203,12 +203,13 @@ taskbufresult_t read_to_taskbuf(int fd, task_t *t)
    fd_set rfds;
    struct timeval tv;
 
-   //FD_ZERO(&rfds);
-  // FD_SET(fd, &rfds);
-   //tv.tv_sec = 10;
-   //tv.tv_usec = 0;
-   //if (select(1, &rfds, NULL, NULL, &tv) == 0)
-    //  return TBUF_ERROR;
+   // HANGING CONNECTIONS: Use select() to timeout dead connections
+   FD_ZERO(&rfds);
+   FD_SET(fd, &rfds);
+   tv.tv_sec = 7;
+   tv.tv_usec = 0;
+   if (select(fd+1, &rfds, NULL, NULL, &tv) == 0)
+      return TBUF_ERROR;
 
 	if (t->head == t->tail || headpos < tailpos)
 		amt = read(fd, &t->buf[tailpos], TASKBUFSIZ - tailpos);
@@ -701,7 +702,6 @@ static void task_upload(task_t *t)
 
 	assert(t->type == TASK_UPLOAD);
 	// First, read the request from the peer.
-   // TIMEOUT: TODO: Implement thread timeout for unresponsive peers
 	while (1) {
       //printf("READING CONNECTION RPC\n");
 		int ret = read_to_taskbuf(t->peer_fd, t);
@@ -725,7 +725,7 @@ static void task_upload(task_t *t)
 	}
 	t->head = t->tail = 0;
 
-   // BAD FILES: Restricting uploads to files in current directory
+   // RESTRICTED FILES: Restricting uploads to files in current directory
 	if ((dir = opendir(".")) == NULL)
 		die("open directory: %s", strerror(errno));
    while ((ent = readdir(dir)) != NULL) {
@@ -866,22 +866,19 @@ int main(int argc, char *argv[])
 	listen_task = start_listen();
 	register_files(tracker_task, myalias);
 
-   // TODO: Here is the sequential download and upload code. We must change
-   //    this section.
-
 	// First, download files named on command line.
 	task_description_t * td;
 	for (; argc > 1; argc--, argv++) {
 		if ((t = start_download(tracker_task, argv[1]))) {
 	         td = (task_description_t *) malloc(sizeof(task_description_t));
 				if(td == NULL){
-					error("Could not allocate data for task description\n");
+					error("* Task description allocation error\n");
 					break;
 				}
             td->type = TASK_DOWNLOAD;
 				td->tracker_task = (task_t *) malloc(sizeof(task_t));
 				if(td->tracker_task == NULL){
-					error("Could not allocate data for task tracker\n");
+					error("* Task tracker allocation error\n");
 					free(td);
 					break;
 				}
@@ -895,7 +892,7 @@ int main(int argc, char *argv[])
 	while ((t = task_listen(listen_task))){
 	         td = (task_description_t *) malloc(sizeof(task_description_t));
             if(td == NULL){
-               error("Could not allocate data for task description\n");
+					error("* Task description allocation error\n");
                break;
             }
             td->type = TASK_UPLOAD;
@@ -988,10 +985,11 @@ int do_task(task_description_t * td){
 					   break;
 				}
 				if(pthread_create(&threads[i].thread,NULL,start_routine,(void *)i)){
-	           //If return value is non-zero, there is an error
-              error("Could not create thread\n");
-   				pthread_mutex_unlock(&task_mutex);
-				  return -1;
+	            // If return value is non-zero, there is an error
+               // TODO: Clean up thread[i]
+               error("Could not create thread\n");
+   			   pthread_mutex_unlock(&task_mutex);
+				   return -1;
             }
 				break;
 			}
