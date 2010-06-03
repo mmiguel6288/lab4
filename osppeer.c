@@ -98,10 +98,12 @@ typedef struct task_description_struct{
 	task_t * t;
 	struct task_description_struct * next;
 } task_description_t;
+
 typedef struct thread_data_struct{
 	task_description_t * td;
 	pthread_t thread;
 } thread_data_t;
+
 static unsigned int thread_count;
 static unsigned int pending_task_count;
 static thread_data_t threads[MAX_THREADS];
@@ -338,7 +340,7 @@ static size_t read_tracker_response(task_t *t)
 
 	while (1) {
 		// Check for whether buffer is complete.
-		for (; pos+3 < t->tail; pos++)
+		for (; pos+3 < t->tail; pos++) {
 			if ((pos == 0 || t->buf[pos-1] == '\n')
 			    && isdigit((unsigned char) t->buf[pos])
 			    && isdigit((unsigned char) t->buf[pos+1])
@@ -353,14 +355,21 @@ static size_t read_tracker_response(task_t *t)
 					return split_pos;
 				}
 			}
+      }
 
 		// If not, read more data.  Note that the read will not block
 		// unless NO data is available.
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR)
 			die("tracker read error");
-		else if (ret == TBUF_END)
-			die("tracker connection closed prematurely!\n");
+		else if (ret == TBUF_END){
+         return split_pos;
+      }
+		//	die("tracker connection closed prematurely!\n");
+      // From Peter: I tried calling read_to_taskbuf() repeatedly if TBUF_END
+      //    was returned, but for make run-popular, nothing happened. So I am
+      //    guessing that the problem is that the tracker is not getting
+      //    our original RPC request for WANT
 	}
 }
 
@@ -507,6 +516,9 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	task_t *t = NULL;
 	peer_t *p;
 	size_t messagepos;
+   size_t written;
+	char large_buf[TASKBUFSIZ*3];
+
 	assert(tracker_task->type == TASK_TRACKER);
 
 	if(strlen(filename) > FILENAMESIZ){
@@ -516,14 +528,23 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 
 	message("* Finding peers for '%s'\n", filename);
 
+   // POPULAR TRACKER BUG: The tracker's response to the WANT RPC contains more
+   //    than TASKBUFSIZ characters. Therefore it wont fit in tracker_task->buf
+   memset(large_buf, 0, TASKBUFSIZ*3);
+   messagepos = -1;
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
-	messagepos = read_tracker_response(tracker_task);
+   while ((int)messagepos < 0) {
+   	messagepos = read_tracker_response(tracker_task);
+      written = strlen(large_buf);
+      strncat(large_buf, tracker_task->buf, strlen(tracker_task->buf));
+   }
+   messagepos += written;
 
 	//TODO: Save checksum with command MD5SUM <file> to tracker
 
-	if (tracker_task->buf[messagepos] != '2') {
+	if (large_buf[messagepos] != '2') {
 		error("* Tracker error message while requesting '%s':\n%s",
-		      filename, &tracker_task->buf[messagepos]);
+		      filename, &large_buf[messagepos]);
 		goto exit;
 	}
 
@@ -536,15 +557,15 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 
 	
 	// add peers
-	s1 = tracker_task->buf;
-	while ((s2 = memchr(s1, '\n', (tracker_task->buf + messagepos) - s1))) {
+   s1 = large_buf;
+	while ((s2 = memchr(s1, '\n', (large_buf + messagepos) - s1))) {
 		if (!(p = parse_peer(s1, s2 - s1)))
 			die("osptracker responded to WANT command with unexpected format!\n");
 		p->next = t->peer_list;
 		t->peer_list = p;
 		s1 = s2 + 1;
 	}
-	if (s1 != tracker_task->buf + messagepos)
+	if (s1 != large_buf + messagepos)
 		die("osptracker's response to WANT has unexpected format!\n");
 
     exit:
@@ -626,7 +647,7 @@ static void task_download(task_t *t, task_t *tracker_task)
          error("* File too large");
          goto try_again;
       }
-      printf("TOTAL WRITTEN = %d\n", t->total_written);
+      //printf("TOTAL WRITTEN = %d\n", t->total_written);
 
 		ret = write_from_taskbuf(t->disk_fd, t);
 		if (ret == TBUF_ERROR) {
@@ -781,7 +802,129 @@ static void task_upload(task_t *t)
 	task_free(t);
 }
 
+/* pthreads parallelization implemenation */
 int do_task(task_description_t * td);
+void end_thread(uint32_t i);
+void *thread_upload(void *i);
+void *thread_download(void *i);
+
+int do_task(task_description_t * td){
+	uint32_t i;
+
+	//Acquire mutex
+	pthread_mutex_lock(&task_mutex);
+
+	//If we can make a new thread
+	if (thread_count < MAX_THREADS){
+		//Search for a thread spot
+		for(i=0;i<MAX_THREADS;i++){
+			if(threads[i].td == NULL){
+				threads[i].td = td;
+				thread_count++;
+				void *(*start_routine)(void*);
+				switch(td->type){
+					case TASK_DOWNLOAD:
+						start_routine = thread_download;
+					   break;
+					case TASK_UPLOAD:
+						start_routine = thread_upload;
+					   break;
+					default:
+					   break;
+				}
+				if(pthread_create(&threads[i].thread,NULL,start_routine,(void *)i)){
+	            // If return value is non-zero, there is an error
+               error("Could not create thread\n");
+   			   pthread_mutex_unlock(&task_mutex);
+               end_thread(i);
+				   return -1;
+            }
+				break;
+			}
+		}	
+	} else { //No free thread spots
+		if(pending_task_count < MAX_PENDING_TASKS){
+			//Add to queue
+			if(pending_task_count == 0) {
+				pending_tasks_head = pending_tasks_tail = td;
+			} else {
+				pending_tasks_tail = (pending_tasks_tail->next = td);
+			}	
+			pending_task_count++;
+		} else {
+			error("Maximum number of pending tasks reached."
+               "Request will not be processed.\n");
+	      pthread_mutex_unlock(&task_mutex);			
+	      return -2;
+		}
+	}
+	//Release mutex
+	pthread_mutex_unlock(&task_mutex);			
+	return 0;
+}
+
+void end_thread(uint32_t i){
+	//Free task description
+	free(threads[i].td->tracker_task);
+	free(threads[i].td);
+
+  //Look for other tasks first
+   pthread_mutex_lock(&task_mutex);
+   if(pending_task_count > 0){
+      if(pending_task_count == 1){
+         threads[i].td = pending_tasks_head;
+         pending_tasks_head = pending_tasks_tail = NULL;
+         pending_task_count = 0;
+      }
+      else{
+         threads[i].td = pending_tasks_head;
+         pending_tasks_head = pending_tasks_head->next;
+         pending_task_count--;
+      }
+		//Execute task
+      void *(*start_routine)(void*);
+      switch(threads[i].td->type){
+         case TASK_DOWNLOAD:
+            start_routine = thread_download;
+         break;
+         case TASK_UPLOAD:
+            start_routine = thread_upload;
+         break;
+			default:
+			break;
+      }
+      if(pthread_create(&threads[i].thread, NULL, start_routine, (void *) i)){
+         //If return value is non-zero, there is an error
+         error("Could not create thread\n");
+
+	      //Free task description
+	      free(threads[i].td->tracker_task);
+	      free(threads[i].td);
+   	   threads[i].td = NULL;
+   	   thread_count--;
+      }
+   } else {
+		//No pending tasks
+   	threads[i].td = NULL;
+   	thread_count--;
+	}
+  	pthread_mutex_unlock(&task_mutex);
+   pthread_exit(NULL);
+}
+
+void *thread_download(void * i){
+	task_description_t * td = threads[(uint32_t) i].td;
+	task_download(td->t,td->tracker_task);
+	end_thread((uint32_t) i);
+	return 0;
+}
+void *thread_upload(void * i){
+	task_description_t * td = threads[(uint32_t) i].td;
+	task_upload(td->t);
+	end_thread((uint32_t) i);
+	return 0;
+}
+
 
 // main(argc, argv)
 //	The main loop!
@@ -876,6 +1019,7 @@ int main(int argc, char *argv[])
 					break;
 				}
             td->type = TASK_DOWNLOAD;
+            /* TODO: Fix possible race conditions? See POPULAR TRACKER BUG
 				td->tracker_task = (task_t *) malloc(sizeof(task_t));
 				if(td->tracker_task == NULL){
 					error("* Task tracker allocation error\n");
@@ -883,134 +1027,27 @@ int main(int argc, char *argv[])
 					break;
 				}
 				memcpy(td->tracker_task,tracker_task,sizeof(task_t));
+            */
+            td->tracker_task = start_tracker(tracker_addr, tracker_port);
             td->t = t; 
 				do_task(td);
 		}
 	}
 
+
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task))){
-	         td = (task_description_t *) malloc(sizeof(task_description_t));
-            if(td == NULL){
-					error("* Task description allocation error\n");
-               break;
-            }
-            td->type = TASK_UPLOAD;
-				td->tracker_task = NULL;
-            td->t = t;
-            do_task(td);
+	   td = (task_description_t *) malloc(sizeof(task_description_t));
+      if(td == NULL){
+		   error("* Task description allocation error\n");
+         break;
+      }
+      td->type = TASK_UPLOAD;
+		td->tracker_task = NULL;
+      td->t = t;
+      do_task(td);
 	}
 	
 	return 0;
 }
 
-void *thread_upload(void *i);
-void *thread_download(void *i);
-void end_thread(uint32_t i){
-	//Free task description
-	free(threads[i].td->tracker_task);
-	free(threads[i].td);
-  //Look for other tasks first
-   pthread_mutex_lock(&task_mutex);
-   if(pending_task_count > 0){
-      if(pending_task_count == 1){
-         threads[i].td = pending_tasks_head;
-         pending_tasks_head = pending_tasks_tail = NULL;
-         pending_task_count = 0;
-      }
-      else{
-         threads[i].td = pending_tasks_head;
-         pending_tasks_head = pending_tasks_head->next;
-         pending_task_count--;
-      }
-		//Execute task
-      void *(*start_routine)(void*);
-      switch(threads[i].td->type){
-         case TASK_DOWNLOAD:
-            start_routine = thread_download;
-         break;
-         case TASK_UPLOAD:
-            start_routine = thread_upload;
-         break;
-			default:
-			break;
-      }
-      if(pthread_create(&threads[i].thread,NULL,start_routine,(void *) i)){
-        //If return value is non-zero, there is an error
-        error("Could not create thread\n");
-      }
-   }
-	else{
-		//No pending tasks
-   	threads[i].td = NULL;
-   	thread_count--;
-	}
-  	pthread_mutex_unlock(&task_mutex);
-   pthread_exit(NULL);
-}
-
-void *thread_download(void * i){
-	task_description_t * td = threads[(uint32_t) i].td;
-	task_download(td->t,td->tracker_task);
-	end_thread((uint32_t) i);
-	return 0;
-}
-void *thread_upload(void * i){
-	task_description_t * td = threads[(uint32_t) i].td;
-	task_upload(td->t);
-	end_thread((uint32_t) i);
-	return 0;
-}
-
-int do_task(task_description_t * td){
-	uint32_t i;
-	//Acquire mutex
-	pthread_mutex_lock(&task_mutex);
-	//If we can make a new thread
-	if (thread_count < MAX_THREADS){
-		//Search for a thread spot
-		for(i=0;i<MAX_THREADS;i++){
-			if(threads[i].td == NULL){
-				threads[i].td = td;
-				thread_count++;
-				void *(*start_routine)(void*);
-				switch(td->type){
-					case TASK_DOWNLOAD:
-						start_routine = thread_download;
-					   break;
-					case TASK_UPLOAD:
-						start_routine = thread_upload;
-					   break;
-					default:
-					   break;
-				}
-				if(pthread_create(&threads[i].thread,NULL,start_routine,(void *)i)){
-	            // If return value is non-zero, there is an error
-               // TODO: Clean up thread[i]
-               error("Could not create thread\n");
-   			   pthread_mutex_unlock(&task_mutex);
-				   return -1;
-            }
-				break;
-			}
-		}	
-	} else { //No free thread spots
-		if(pending_task_count < MAX_PENDING_TASKS){
-			//Add to queue
-			if(pending_task_count == 0) {
-				pending_tasks_head = pending_tasks_tail = td;
-			} else {
-				pending_tasks_tail = (pending_tasks_tail->next = td);
-			}	
-			pending_task_count++;
-		} else {
-			error("Maximum number of pending tasks reached."
-               "Request will not be processed.\n");
-	      pthread_mutex_unlock(&task_mutex);			
-	      return -2;
-		}
-	}
-	//Release mutex
-	pthread_mutex_unlock(&task_mutex);			
-	return 0;
-}

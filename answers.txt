@@ -48,6 +48,11 @@ Email: mmiguel6288@gmail.com
 
 1) Download: Infinite File Size
 
+      Set a max file size limit of 65536 for any file downloaded. Any download
+   task that downloads more than 65536 bytes will have its connection dropped.
+   Ideally, trackers should provide the size of the files tracked so that
+   clients can take precautions agains infinite file size attacks.
+
 2) Upload: Restricted Files
 
 3) Upload: Infinite File Requests
