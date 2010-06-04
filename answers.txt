@@ -72,6 +72,14 @@ Email: mmiguel6288@gmail.com
 
 4) Hanging Peers
 
+      To deal with hanging peer connections, I used the select() function in
+   my read_to_taskbuf() function to timeout unresponsive file descriptors.
+   select() basically takes a set of read/write file descriptors and checks to
+   see when a read/write action will not block. I can also specify a timeout
+   delay so that when a certain time has passed and I am unable to read
+   anything from the file descriptor, I simply timeout, return an error, and
+   drop the connection.
+
 5) File Integrity
    
       See Extra Credit section.

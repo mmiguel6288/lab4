@@ -363,9 +363,11 @@ static size_t read_tracker_response(task_t *t)
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR)
 			die("tracker read error");
-		else if (ret == TBUF_END)
+		else if (ret == TBUF_END) {
+         if (pos == 0)
+		      die("tracker connection closed prematurely!\n");
          return split_pos;
-	//	die("tracker connection closed prematurely!\n");
+      }
 	}
 }
 
@@ -1048,7 +1050,6 @@ int main(int argc, char *argv[])
 
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task))){
-      printf("THREAD COUNT = %d\n", thread_count);
 	   td = (task_description_t *) malloc(sizeof(task_description_t));
       if(td == NULL){
 		   error("* Task description allocation error\n");
