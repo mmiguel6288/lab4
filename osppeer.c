@@ -32,7 +32,7 @@ static int listen_port;
 //TODO: Checksums
 //Idea for checksums:
 //When a file is introduced to the tracker, the checksum is recorded by the tracker.
-//Before download, compute the checksum and compare to the trusted value in the tracker. If the checksums differ, then do not downloa.
+//Before download, compute the checksum and compare to the trusted value in the tracker. If the checksums differ, then do not download.
 
 //TODO: make run-bad, don't run out of memory or file descriptors
 
