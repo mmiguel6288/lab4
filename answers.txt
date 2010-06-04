@@ -55,7 +55,20 @@ Email: mmiguel6288@gmail.com
 
 2) Upload: Restricted Files
 
+      To prevent malicious peers from trying to download restricted files
+   outside our specified p2p directory, I simply had osppeer check to see if
+   the file requested exists in the specified directory. If it is not there,
+   then the requested file is considered restricted and the connection should
+   be closed immediately.
+
 3) Upload: Infinite File Requests
+
+      To deal with infinite file requests, we rely on long-term scheduling
+   techniques to limit the number of requests we can handle at any specific
+   time. We only allow a very few number requests to be processed by a
+   specified number of threads. All other requests are put on pending wait
+   lists that will be called after each active thread finishes on a first-come
+   first-serve basis.
 
 4) Hanging Peers
 

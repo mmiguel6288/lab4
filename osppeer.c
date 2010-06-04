@@ -110,6 +110,7 @@ static thread_data_t threads[MAX_THREADS];
 static task_description_t * pending_tasks_head;
 static task_description_t * pending_tasks_tail;
 static pthread_mutex_t task_mutex;
+static pthread_mutex_t tracker_mutex;
 
 
 //Checksum variable
@@ -362,14 +363,9 @@ static size_t read_tracker_response(task_t *t)
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR)
 			die("tracker read error");
-		else if (ret == TBUF_END){
+		else if (ret == TBUF_END)
          return split_pos;
-      }
-		//	die("tracker connection closed prematurely!\n");
-      // From Peter: I tried calling read_to_taskbuf() repeatedly if TBUF_END
-      //    was returned, but for make run-popular, nothing happened. So I am
-      //    guessing that the problem is that the tracker is not getting
-      //    our original RPC request for WANT
+	//	die("tracker connection closed prematurely!\n");
 	}
 }
 
@@ -517,7 +513,8 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	peer_t *p;
 	size_t messagepos;
    size_t written;
-	char large_buf[TASKBUFSIZ*3];
+   char *large_buf;
+   size_t l_bufsize;
 
 	assert(tracker_task->type == TASK_TRACKER);
 
@@ -530,12 +527,22 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 
    // POPULAR TRACKER BUG: The tracker's response to the WANT RPC contains more
    //    than TASKBUFSIZ characters. Therefore it wont fit in tracker_task->buf
-   memset(large_buf, 0, TASKBUFSIZ*3);
+   
+   large_buf = malloc(TASKBUFSIZ);
+   large_buf[0] = '\0';
+   l_bufsize = TASKBUFSIZ;
    messagepos = -1;
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
    while ((int)messagepos < 0) {
-   	messagepos = read_tracker_response(tracker_task);
       written = strlen(large_buf);
+   	messagepos = read_tracker_response(tracker_task);
+      if (strlen(tracker_task->buf) + written > l_bufsize) {
+         l_bufsize += TASKBUFSIZ;
+         if ((large_buf = realloc(large_buf, l_bufsize)) == NULL) {
+		      error("* Error while allocating buffer");
+		      goto exit;
+         }
+      }
       strncat(large_buf, tracker_task->buf, strlen(tracker_task->buf));
    }
    messagepos += written;
@@ -559,8 +566,10 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	// add peers
    s1 = large_buf;
 	while ((s2 = memchr(s1, '\n', (large_buf + messagepos) - s1))) {
-		if (!(p = parse_peer(s1, s2 - s1)))
+		if (!(p = parse_peer(s1, s2 - s1))) {
+         //printf ("BUF = \n%s\n", large_buf);
 			die("osptracker responded to WANT command with unexpected format!\n");
+      }        
 		p->next = t->peer_list;
 		t->peer_list = p;
 		s1 = s2 + 1;
@@ -568,8 +577,9 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	if (s1 != large_buf + messagepos)
 		die("osptracker's response to WANT has unexpected format!\n");
 
-    exit:
-	return t;
+exit:
+   free(large_buf);
+   return t;
 }
 
 
@@ -695,6 +705,7 @@ static task_t *task_listen(task_t *listen_task)
 
 	fd = accept(listen_task->peer_fd,
 		    (struct sockaddr *) &peer_addr, &peer_addrlen);
+
 	if (fd == -1 && (errno == EINTR || errno == EAGAIN
 			 || errno == EWOULDBLOCK))
 		return NULL;
@@ -817,8 +828,8 @@ int do_task(task_description_t * td){
 	//If we can make a new thread
 	if (thread_count < MAX_THREADS){
 		//Search for a thread spot
-		for(i=0;i<MAX_THREADS;i++){
-			if(threads[i].td == NULL){
+		for (i = 0; i < MAX_THREADS; i++) {
+			if (threads[i].td == NULL) {
 				threads[i].td = td;
 				thread_count++;
 				void *(*start_routine)(void*);
@@ -1013,30 +1024,31 @@ int main(int argc, char *argv[])
 	task_description_t * td;
 	for (; argc > 1; argc--, argv++) {
 		if ((t = start_download(tracker_task, argv[1]))) {
-	         td = (task_description_t *) malloc(sizeof(task_description_t));
-				if(td == NULL){
-					error("* Task description allocation error\n");
-					break;
-				}
-            td->type = TASK_DOWNLOAD;
-            /* TODO: Fix possible race conditions? See POPULAR TRACKER BUG
-				td->tracker_task = (task_t *) malloc(sizeof(task_t));
-				if(td->tracker_task == NULL){
-					error("* Task tracker allocation error\n");
-					free(td);
-					break;
-				}
-				memcpy(td->tracker_task,tracker_task,sizeof(task_t));
-            */
-            td->tracker_task = start_tracker(tracker_addr, tracker_port);
-            td->t = t; 
-				do_task(td);
+	      td = (task_description_t *) malloc(sizeof(task_description_t));
+			if(td == NULL){
+				error("* Task description allocation error\n");
+				break;
+			}
+         td->type = TASK_DOWNLOAD;
+         /* TODO: Fix possible race conditions? See POPULAR TRACKER BUG
+			td->tracker_task = (task_t *) malloc(sizeof(task_t));
+			if(td->tracker_task == NULL){
+				error("* Task tracker allocation error\n");
+				free(td);
+				break;
+			}
+			memcpy(td->tracker_task,tracker_task,sizeof(task_t));
+         */
+         td->tracker_task = start_tracker(tracker_addr, tracker_port);
+         td->t = t; 
+			do_task(td);
 		}
 	}
 
 
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task))){
+      printf("THREAD COUNT = %d\n", thread_count);
 	   td = (task_description_t *) malloc(sizeof(task_description_t));
       if(td == NULL){
 		   error("* Task description allocation error\n");
