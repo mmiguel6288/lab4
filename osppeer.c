@@ -24,6 +24,8 @@
 #include "osp2p.h"
 #include <pthread.h>
 
+#define MAXFILESIZ 65536
+
 int evil_mode;				// 1 iff this peer should behave badly
 
 static struct in_addr listen_addr;	// Define listening endpoint
@@ -88,7 +90,7 @@ typedef struct task {
 } task_t;
 
 //Parallel Tasking Structs
-#define MAX_THREADS 15
+#define MAX_THREADS 3 // Should be low to reduce context switching
 #define MAX_PENDING_TASKS 200
 typedef struct task_description_struct{
 	tasktype_t type;
@@ -96,16 +98,19 @@ typedef struct task_description_struct{
 	task_t * t;
 	struct task_description_struct * next;
 } task_description_t;
+
 typedef struct thread_data_struct{
 	task_description_t * td;
 	pthread_t thread;
 } thread_data_t;
+
 static unsigned int thread_count;
 static unsigned int pending_task_count;
 static thread_data_t threads[MAX_THREADS];
 static task_description_t * pending_tasks_head;
 static task_description_t * pending_tasks_tail;
 static pthread_mutex_t task_mutex;
+static pthread_mutex_t tracker_mutex;
 
 
 //Checksum variable
@@ -198,6 +203,16 @@ taskbufresult_t read_to_taskbuf(int fd, task_t *t)
 	unsigned headpos = (t->head % TASKBUFSIZ);
 	unsigned tailpos = (t->tail % TASKBUFSIZ);
 	ssize_t amt;
+   fd_set rfds;
+   struct timeval tv;
+
+   // HANGING CONNECTIONS: Use select() to timeout dead connections
+   FD_ZERO(&rfds);
+   FD_SET(fd, &rfds);
+   tv.tv_sec = 7;
+   tv.tv_usec = 0;
+   if (select(fd+1, &rfds, NULL, NULL, &tv) == 0)
+      return TBUF_ERROR;
 
 	if (t->head == t->tail || headpos < tailpos)
 		amt = read(fd, &t->buf[tailpos], TASKBUFSIZ - tailpos);
@@ -326,7 +341,7 @@ static size_t read_tracker_response(task_t *t)
 
 	while (1) {
 		// Check for whether buffer is complete.
-		for (; pos+3 < t->tail; pos++)
+		for (; pos+3 < t->tail; pos++) {
 			if ((pos == 0 || t->buf[pos-1] == '\n')
 			    && isdigit((unsigned char) t->buf[pos])
 			    && isdigit((unsigned char) t->buf[pos+1])
@@ -341,14 +356,20 @@ static size_t read_tracker_response(task_t *t)
 					return split_pos;
 				}
 			}
+      }
 
 		// If not, read more data.  Note that the read will not block
 		// unless NO data is available.
 		int ret = read_to_taskbuf(t->peer_fd, t);
+      printf("TAILPOS = %d\n", t->tail);
+      printf("PARTIAL RESPONSE = \n%s\n\n", t->buf);
 		if (ret == TBUF_ERROR)
 			die("tracker read error");
-		else if (ret == TBUF_END)
-			die("tracker connection closed prematurely!\n");
+		else if (ret == TBUF_END) {
+         if (pos == 0)
+		      die("tracker connection closed prematurely!\n");
+         return split_pos;
+      }
 	}
 }
 
@@ -495,6 +516,10 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 	task_t *t = NULL;
 	peer_t *p;
 	size_t messagepos;
+   size_t written;
+   char *large_buf;
+   size_t l_bufsize;
+
 	assert(tracker_task->type == TASK_TRACKER);
 
 	if(strlen(filename) > FILENAMESIZ){
@@ -504,14 +529,37 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 
 	message("* Finding peers for '%s'\n", filename);
 
+   // POPULAR TRACKER BUG: The tracker's response to the WANT RPC contains more
+   //    than TASKBUFSIZ characters. Therefore it wont fit in tracker_task->buf
+   
+   large_buf = malloc(TASKBUFSIZ);
+   large_buf[0] = '\0';
+   l_bufsize = TASKBUFSIZ;
+   messagepos = -1;
+   printf("\n--------------------------------\n"
+          "NEW SET\n"
+          "--------------------------------\n");
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
-	messagepos = read_tracker_response(tracker_task);
+   while ((int)messagepos < 0) {
+      written = strlen(large_buf);
+   	messagepos = read_tracker_response(tracker_task);
+      if (strlen(tracker_task->buf) + written > l_bufsize) {
+         l_bufsize += TASKBUFSIZ;
+         if ((large_buf = realloc(large_buf, l_bufsize)) == NULL) {
+		      error("* Error while allocating buffer");
+		      goto exit;
+         }
+      }
+      strncat(large_buf, tracker_task->buf, strlen(tracker_task->buf));
+      printf("TOTAL SO FAR = \n%s\n\n", large_buf);
+   }
+   messagepos += written;
 
 	//TODO: Save checksum with command MD5SUM <file> to tracker
 
-	if (tracker_task->buf[messagepos] != '2') {
+	if (large_buf[messagepos] != '2') {
 		error("* Tracker error message while requesting '%s':\n%s",
-		      filename, &tracker_task->buf[messagepos]);
+		      filename, &large_buf[messagepos]);
 		goto exit;
 	}
 
@@ -524,19 +572,22 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 
 	
 	// add peers
-	s1 = tracker_task->buf;
-	while ((s2 = memchr(s1, '\n', (tracker_task->buf + messagepos) - s1))) {
-		if (!(p = parse_peer(s1, s2 - s1)))
+   s1 = large_buf;
+	while ((s2 = memchr(s1, '\n', (large_buf + messagepos) - s1))) {
+		if (!(p = parse_peer(s1, s2 - s1))) {
+         //printf ("BUF = \n%s\n", large_buf);
 			die("osptracker responded to WANT command with unexpected format!\n");
+      }        
 		p->next = t->peer_list;
 		t->peer_list = p;
 		s1 = s2 + 1;
 	}
-	if (s1 != tracker_task->buf + messagepos)
+	if (s1 != large_buf + messagepos)
 		die("osptracker's response to WANT has unexpected format!\n");
 
-    exit:
-	return t;
+exit:
+   free(large_buf);
+   return t;
 }
 
 
@@ -608,6 +659,13 @@ static void task_download(task_t *t, task_t *tracker_task)
 		} else if (ret == TBUF_END && t->head == t->tail)
 			/* End of file */
 			break;
+      
+      // INFINITE DATA: Prevents downloading forever
+      if (t->total_written + (t->tail - t->head) > MAXFILESIZ) {
+         error("* File too large");
+         goto try_again;
+      }
+      //printf("TOTAL WRITTEN = %d\n", t->total_written);
 
 		ret = write_from_taskbuf(t->disk_fd, t);
 		if (ret == TBUF_ERROR) {
@@ -655,6 +713,7 @@ static task_t *task_listen(task_t *listen_task)
 
 	fd = accept(listen_task->peer_fd,
 		    (struct sockaddr *) &peer_addr, &peer_addrlen);
+
 	if (fd == -1 && (errno == EINTR || errno == EAGAIN
 			 || errno == EWOULDBLOCK))
 		return NULL;
@@ -676,9 +735,15 @@ static task_t *task_listen(task_t *listen_task)
 //	the requested file.
 static void task_upload(task_t *t)
 {
+	DIR *dir;
+	struct dirent *ent;
+	struct stat s;
+   int exists = 0;
+
 	assert(t->type == TASK_UPLOAD);
 	// First, read the request from the peer.
 	while (1) {
+      //printf("READING CONNECTION RPC\n");
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Cannot read from connection");
@@ -688,12 +753,43 @@ static void task_upload(task_t *t)
 			break;
 	}
 
+   // BUFFER OVERRRUN: Filename Size
 	assert(t->head == 0);
+   if ((t->tail - strlen("GET  OSP2P\n")) > FILENAMESIZ) {
+      error("* Peer filename buffer overrun error");
+      goto exit;
+   }
 	if (osp2p_snscanf(t->buf, t->tail, "GET %s OSP2P\n", t->filename) < 0) {
 		error("* Odd request %.*s\n", t->tail, t->buf);
 		goto exit;
 	}
 	t->head = t->tail = 0;
+
+   // RESTRICTED FILES: Restricting uploads to files in current directory
+	if ((dir = opendir(".")) == NULL)
+		die("open directory: %s", strerror(errno));
+   while ((ent = readdir(dir)) != NULL) {
+		int namelen = strlen(ent->d_name);
+		
+		// don't depend on unreliable parts of the dirent structure
+		// and only report regular files.  Do not change these lines.
+		if (stat(ent->d_name, &s) < 0 || !S_ISREG(s.st_mode)
+		    || (namelen > 2 && ent->d_name[namelen - 2] == '.'
+			&& (ent->d_name[namelen - 1] == 'c'
+			    || ent->d_name[namelen - 1] == 'h'))
+		    || (namelen > 1 && ent->d_name[namelen - 1] == '~'))
+			continue;
+
+      if (strcmp(ent->d_name, t->filename) == 0) {
+         exists = 1;
+         break;
+      }
+	}
+   closedir(dir);
+   if (!exists) {
+      error("* Invalid file %s", t->filename);
+      goto exit;
+   }
 
 	t->disk_fd = open(t->filename, O_RDONLY);
 	if (t->disk_fd == -1) {
@@ -725,7 +821,129 @@ static void task_upload(task_t *t)
 	task_free(t);
 }
 
+/* pthreads parallelization implemenation */
 int do_task(task_description_t * td);
+void end_thread(uint32_t i);
+void *thread_upload(void *i);
+void *thread_download(void *i);
+
+int do_task(task_description_t * td){
+	uint32_t i;
+
+	//Acquire mutex
+	pthread_mutex_lock(&task_mutex);
+
+	//If we can make a new thread
+	if (thread_count < MAX_THREADS){
+		//Search for a thread spot
+		for (i = 0; i < MAX_THREADS; i++) {
+			if (threads[i].td == NULL) {
+				threads[i].td = td;
+				thread_count++;
+				void *(*start_routine)(void*);
+				switch(td->type){
+					case TASK_DOWNLOAD:
+						start_routine = thread_download;
+					   break;
+					case TASK_UPLOAD:
+						start_routine = thread_upload;
+					   break;
+					default:
+					   break;
+				}
+				if(pthread_create(&threads[i].thread,NULL,start_routine,(void *)i)){
+	            // If return value is non-zero, there is an error
+               error("Could not create thread\n");
+   			   pthread_mutex_unlock(&task_mutex);
+               end_thread(i);
+				   return -1;
+            }
+				break;
+			}
+		}	
+	} else { //No free thread spots
+		if(pending_task_count < MAX_PENDING_TASKS){
+			//Add to queue
+			if(pending_task_count == 0) {
+				pending_tasks_head = pending_tasks_tail = td;
+			} else {
+				pending_tasks_tail = (pending_tasks_tail->next = td);
+			}	
+			pending_task_count++;
+		} else {
+			error("Maximum number of pending tasks reached."
+               "Request will not be processed.\n");
+	      pthread_mutex_unlock(&task_mutex);			
+	      return -2;
+		}
+	}
+	//Release mutex
+	pthread_mutex_unlock(&task_mutex);			
+	return 0;
+}
+
+void end_thread(uint32_t i){
+	//Free task description
+	free(threads[i].td->tracker_task);
+	free(threads[i].td);
+
+  //Look for other tasks first
+   pthread_mutex_lock(&task_mutex);
+   if(pending_task_count > 0){
+      if(pending_task_count == 1){
+         threads[i].td = pending_tasks_head;
+         pending_tasks_head = pending_tasks_tail = NULL;
+         pending_task_count = 0;
+      }
+      else{
+         threads[i].td = pending_tasks_head;
+         pending_tasks_head = pending_tasks_head->next;
+         pending_task_count--;
+      }
+		//Execute task
+      void *(*start_routine)(void*);
+      switch(threads[i].td->type){
+         case TASK_DOWNLOAD:
+            start_routine = thread_download;
+         break;
+         case TASK_UPLOAD:
+            start_routine = thread_upload;
+         break;
+			default:
+			break;
+      }
+      if(pthread_create(&threads[i].thread, NULL, start_routine, (void *) i)){
+         //If return value is non-zero, there is an error
+         error("Could not create thread\n");
+
+	      //Free task description
+	      free(threads[i].td->tracker_task);
+	      free(threads[i].td);
+   	   threads[i].td = NULL;
+   	   thread_count--;
+      }
+   } else {
+		//No pending tasks
+   	threads[i].td = NULL;
+   	thread_count--;
+	}
+  	pthread_mutex_unlock(&task_mutex);
+   pthread_exit(NULL);
+}
+
+void *thread_download(void * i){
+	task_description_t * td = threads[(uint32_t) i].td;
+	task_download(td->t,td->tracker_task);
+	end_thread((uint32_t) i);
+	return 0;
+}
+void *thread_upload(void * i){
+	task_description_t * td = threads[(uint32_t) i].td;
+	task_upload(td->t);
+	end_thread((uint32_t) i);
+	return 0;
+}
+
 
 // main(argc, argv)
 //	The main loop!
@@ -810,160 +1028,46 @@ int main(int argc, char *argv[])
 	listen_task = start_listen();
 	register_files(tracker_task, myalias);
 
-   // TODO: Here is the sequential download and upload code. We must change
-   //    this section.
-
 	// First, download files named on command line.
 	task_description_t * td;
 	for (; argc > 1; argc--, argv++) {
 		if ((t = start_download(tracker_task, argv[1]))) {
-	         td = (task_description_t *) malloc(sizeof(task_description_t));
-				if(td == NULL){
-					error("Could not allocate data for task description\n");
-					break;
-				}
-            td->type = TASK_DOWNLOAD;
-				td->tracker_task = (task_t *) malloc(sizeof(task_t));
-				if(td->tracker_task == NULL){
-					error("Could not allocate data for task tracker\n");
-					free(td);
-					break;
-				}
-				memcpy(td->tracker_task,tracker_task,sizeof(task_t));
-            td->t = t; 
-				do_task(td);
+	      td = (task_description_t *) malloc(sizeof(task_description_t));
+			if(td == NULL){
+				error("* Task description allocation error\n");
+				break;
+			}
+         td->type = TASK_DOWNLOAD;
+         /* TODO: Fix possible race conditions? See POPULAR TRACKER BUG
+         */
+			td->tracker_task = (task_t *) malloc(sizeof(task_t));
+			if(td->tracker_task == NULL){
+				error("* Task tracker allocation error\n");
+				free(td);
+				break;
+			}
+			memcpy(td->tracker_task,tracker_task,sizeof(task_t));
+         /**/
+         //td->tracker_task = start_tracker(tracker_addr, tracker_port);
+         td->tracker_task->peer_fd = tracker_task->peer_fd;
+         td->t = t; 
+			do_task(td);
 		}
 	}
-/*    OLD CODE BELOW
-	for (; argc > 1; argc--, argv++)
-		if ((t = start_download(tracker_task, argv[1])))
-			task_download(t, tracker_task);
-*/
 
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task))){
-	         td = (task_description_t *) malloc(sizeof(task_description_t));
-            if(td == NULL){
-               error("Could not allocate data for task description\n");
-               break;
-            }
-            td->type = TASK_UPLOAD;
-				td->tracker_task = NULL;
-            td->t = t;
-            do_task(td);
+	   td = (task_description_t *) malloc(sizeof(task_description_t));
+      if(td == NULL){
+		   error("* Task description allocation error\n");
+         break;
+      }
+      td->type = TASK_UPLOAD;
+		td->tracker_task = NULL;
+      td->t = t;
+      do_task(td);
 	}
 	
 	return 0;
 }
 
-void *thread_upload(void *i);
-void *thread_download(void *i);
-void end_thread(unsigned int i){
-	//Free task description
-	free(threads[i].td->tracker_task);
-	free(threads[i].td);
-  //Look for other tasks first
-   pthread_mutex_lock(&task_mutex);
-   if(pending_task_count > 0){
-      if(pending_task_count == 1){
-         threads[i].td = pending_tasks_head;
-         pending_tasks_head = pending_tasks_tail = NULL;
-         pending_task_count = 0;
-      }
-      else{
-         threads[i].td = pending_tasks_head;
-         pending_tasks_head = pending_tasks_head->next;
-         pending_task_count--;
-      }
-		//Execute task
-      void *(*start_routine)(void*);
-      switch(threads[i].td->type){
-         case TASK_DOWNLOAD:
-            start_routine = thread_download;
-         break;
-         case TASK_UPLOAD:
-            start_routine = thread_upload;
-         break;
-			default:
-			break;
-      }
-      if(pthread_create(&threads[i].thread,NULL,start_routine,(void *) i)){
-        //If return value is non-zero, there is an error
-        error("Could not create thread\n");
-      }
-   }
-	else{
-		//No pending tasks
-   	threads[i].td = NULL;
-   	thread_count--;
-	}
-  	pthread_mutex_unlock(&task_mutex);
-   pthread_exit(NULL);
-}
-
-void *thread_download(void * i){
-	task_description_t * td = threads[(unsigned int) i].td;
-	task_download(td->t,td->tracker_task);
-	end_thread((unsigned int) i);
-	return 0;
-}
-void *thread_upload(void * i){
-	task_description_t * td = threads[(unsigned int) i].td;
-	task_upload(td->t);
-	end_thread((unsigned int) i);
-	return 0;
-}
-
-int do_task(task_description_t * td){
-	int i;
-	//Acquire mutex
-	pthread_mutex_lock(&task_mutex);
-	//If we can make a new thread
-	if (thread_count < MAX_THREADS){
-		//Search for a thread spot
-		for(i=0;i<MAX_THREADS;i++){
-			if(threads[i].td == NULL){
-				threads[i].td = td;
-				thread_count++;
-				void *(*start_routine)(void*);
-				switch(td->type){
-					case TASK_DOWNLOAD:
-						start_routine = thread_download;
-					break;
-					case TASK_UPLOAD:
-						start_routine = thread_upload;
-					break;
-					default:
-					break;
-				}
-				if(pthread_create(&threads[i].thread,NULL,start_routine,(void *) i)){
-	           //If return value is non-zero, there is an error
-              error("Could not create thread\n");
-   				pthread_mutex_unlock(&task_mutex);
-				  return -1;
-            }
-				break;
-			}
-		}	
-	}
-	else{ //No free thread spots
-		if(pending_task_count < MAX_PENDING_TASKS){
-			//Add to queue
-			if(pending_task_count == 0){
-				pending_tasks_head = pending_tasks_tail = td;
-			}
-			else{
-				pending_tasks_tail = (pending_tasks_tail->next = td);
-			}	
-			pending_task_count++;
-		}
-		else{
-			error("Maximum number of pending tasks reached. Request will not be processed.\n");
-	pthread_mutex_unlock(&task_mutex);			
-	return -2;
-		}
-	}
-	//Release mutex
-	pthread_mutex_unlock(&task_mutex);			
-	return 0;
-}

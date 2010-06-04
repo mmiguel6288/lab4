@@ -25,11 +25,64 @@ Email: mmiguel6288@gmail.com
 # EXERCISE 1: What method you used to make your peer download and upload
 #    files in parallel?  (~1-3 sentences)
 
+1) We used the pthreads.h library to implement multithreaded parallelization.
+   There are predefined constants regarding the maximum number of threads that
+   can be run at one time, and the maximum number of requests that can be 
+   queued up in the case all threads are currently in use.
+
 # EXERCISE 2A: What conditions did you find and fix that would have
 #    triggered a buffer overrun bug?  (~1-3 sentences each)
 
+1) Upload: Filename Overflow
+
+      We fixed the buffer overrun bug regarding large filename requests from 
+   bad peers. A bad peer could have sent our client a GET request containing a 
+   filename larger FILENAMESIZ characters, causing t->filename buffer to
+   overflow. To fix this problem, we calculated the length of the filename
+   within the RPC request to determine if there would be an overflow or not,
+   terminating the connection if it would overflow.
+   
+
 # EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
 #    each)
+
+1) Download: Infinite File Size
+
+      Set a max file size limit of 65536 for any file downloaded. Any download
+   task that downloads more than 65536 bytes will have its connection dropped.
+   Ideally, trackers should provide the size of the files tracked so that
+   clients can take precautions agains infinite file size attacks.
+
+2) Upload: Restricted Files
+
+      To prevent malicious peers from trying to download restricted files
+   outside our specified p2p directory, I simply had osppeer check to see if
+   the file requested exists in the specified directory. If it is not there,
+   then the requested file is considered restricted and the connection should
+   be closed immediately.
+
+3) Upload: Infinite File Requests
+
+      To deal with infinite file requests, we rely on long-term scheduling
+   techniques to limit the number of requests we can handle at any specific
+   time. We only allow a very few number requests to be processed by a
+   specified number of threads. All other requests are put on pending wait
+   lists that will be called after each active thread finishes on a first-come
+   first-serve basis.
+
+4) Hanging Peers
+
+      To deal with hanging peer connections, I used the select() function in
+   my read_to_taskbuf() function to timeout unresponsive file descriptors.
+   select() basically takes a set of read/write file descriptors and checks to
+   see when a read/write action will not block. I can also specify a timeout
+   delay so that when a certain time has passed and I am unable to read
+   anything from the file descriptor, I simply timeout, return an error, and
+   drop the connection.
+
+5) File Integrity
+   
+      See Extra Credit section.
 
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
@@ -37,4 +90,8 @@ Email: mmiguel6288@gmail.com
 # Extra credit problems
 #Extra credit problem: none
 
+1) File Integrity:
+
 # Add any other information you'd like us to know below this line.
+
+1) Performance issues regarding forking:
