@@ -361,6 +361,8 @@ static size_t read_tracker_response(task_t *t)
 		// If not, read more data.  Note that the read will not block
 		// unless NO data is available.
 		int ret = read_to_taskbuf(t->peer_fd, t);
+      printf("TAILPOS = %d\n", t->tail);
+      printf("PARTIAL RESPONSE = \n%s\n\n", t->buf);
 		if (ret == TBUF_ERROR)
 			die("tracker read error");
 		else if (ret == TBUF_END) {
@@ -534,6 +536,9 @@ task_t *start_download(task_t *tracker_task, const char *filename)
    large_buf[0] = '\0';
    l_bufsize = TASKBUFSIZ;
    messagepos = -1;
+   printf("\n--------------------------------\n"
+          "NEW SET\n"
+          "--------------------------------\n");
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
    while ((int)messagepos < 0) {
       written = strlen(large_buf);
@@ -546,6 +551,7 @@ task_t *start_download(task_t *tracker_task, const char *filename)
          }
       }
       strncat(large_buf, tracker_task->buf, strlen(tracker_task->buf));
+      printf("TOTAL SO FAR = \n%s\n\n", large_buf);
    }
    messagepos += written;
 
@@ -1033,6 +1039,7 @@ int main(int argc, char *argv[])
 			}
          td->type = TASK_DOWNLOAD;
          /* TODO: Fix possible race conditions? See POPULAR TRACKER BUG
+         */
 			td->tracker_task = (task_t *) malloc(sizeof(task_t));
 			if(td->tracker_task == NULL){
 				error("* Task tracker allocation error\n");
@@ -1040,13 +1047,13 @@ int main(int argc, char *argv[])
 				break;
 			}
 			memcpy(td->tracker_task,tracker_task,sizeof(task_t));
-         */
-         td->tracker_task = start_tracker(tracker_addr, tracker_port);
+         /**/
+         //td->tracker_task = start_tracker(tracker_addr, tracker_port);
+         td->tracker_task->peer_fd = tracker_task->peer_fd;
          td->t = t; 
 			do_task(td);
 		}
 	}
-
 
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task))){
