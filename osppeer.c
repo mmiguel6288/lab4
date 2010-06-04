@@ -61,7 +61,7 @@ typedef enum tasktype {			// Which type of connection is this?
 
 typedef struct peer {			// A peer connection (TASK_DOWNLOAD) 
 	char alias[TASKBUFSIZ];		// => Peer's alias
-	struct in_addr addr;		// => Peer's IP address
+	struct in_addr addr;		// => Peer's IP address //this gives segfault
 	int port;			// => Peer's port number
 	struct peer *next;
 } peer_t;
@@ -113,8 +113,9 @@ static pthread_mutex_t task_mutex;
 static pthread_mutex_t tracker_mutex;
 
 
-//Checksum variable
-md5_state_t pms;
+//File integrity checking
+#define MD5_READ_SIZE 128  //This is arbitrary, put whatever
+int compute_Checksum(char* filename, char* digest);
 
 // task_new(type)
 //	Create and return a new task of type 'type'.
@@ -447,6 +448,7 @@ static void register_files(task_t *tracker_task, const char *myalias)
 	struct stat s;
 	char buf[PATH_MAX];
 	size_t messagepos;
+	char digest[MD5_TEXT_DIGEST_MAX_SIZE+1];
 	assert(tracker_task->type == TASK_TRACKER);
 
 	// Register address with the tracker.
@@ -477,7 +479,19 @@ static void register_files(task_t *tracker_task, const char *myalias)
 			continue;
 
 		//TODO: Calculate check sum and place after file name	
-		osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", ent->d_name);
+
+		/*if(compute_Checksum(ent->d_name,digest) < 0){
+			error("Could not calculate checksum\n");
+			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", ent->d_name);
+		}
+		else{
+			message("HAVE %s %s\n", ent->d_name,digest);
+			osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n", ent->d_name,digest);
+		}*/
+		compute_Checksum(ent->d_name,digest);
+		message("HAVE %s %s\n", ent->d_name,digest);
+		osp2p_writef(tracker_task->peer_fd,"Have %s %s\n",ent->d_name,digest);
+
 		messagepos = read_tracker_response(tracker_task);
 		if (tracker_task->buf[messagepos] != '2')
 			error("* Tracker error message while registering '%s':\n%s",
@@ -554,6 +568,7 @@ task_t *start_download(task_t *tracker_task, const char *filename)
    messagepos += written;
 
 	//TODO: Save checksum with command MD5SUM <file> to tracker
+	//Please clarify the above line ---- why?
 
 	if (large_buf[messagepos] != '2') {
 		error("* Tracker error message while requesting '%s':\n%s",
@@ -598,6 +613,8 @@ static void task_download(task_t *t, task_t *tracker_task)
 	int i, ret = -1;
 	assert((!t || t->type == TASK_DOWNLOAD)
 	       && tracker_task->type == TASK_TRACKER);
+	char digest[MD5_TEXT_DIGEST_MAX_SIZE+1];
+	size_t messagepos;
 
 	// Quit if no peers, and skip this peer
 	if (!t || !t->peer_list) {
@@ -677,11 +694,20 @@ static void task_download(task_t *t, task_t *tracker_task)
 		// Inform the tracker that we now have the file,
 		// and can serve it to others!  (But ignore tracker errors.)
 		//TODO: Compare downloaded file to saved checksum
+		//TODO: Figure out how to interpret response for checksum
 		if (strcmp(t->filename, t->disk_filename) == 0) {
+//will uncomment these lines
+			//compute_Checksum(t->disk_filename,digest);
+			//osp2p_writef(tracker_task->peer_fd, "MD5SUM %s\n",
+			//			t->filename);
+			//messagepos = read_tracker_response(tracker_task);
+			//message("%s\n",digest);//debug
+			//message("%s\n",(t->buf)[messagepos]); //this gives segfault
+			//Check if equal ---
          // Mutex because other threads may be talking to the tracker NOW
 	      pthread_mutex_lock(&tracker_mutex);
-			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
-				     t->filename);
+			osp2p_writef(tracker_task->peer_fd, "HAVE %s %s\n",
+				     t->filename, digest);
 			(void) read_tracker_response(tracker_task);
 	      pthread_mutex_unlock(&tracker_mutex);
 		}
@@ -1067,4 +1093,20 @@ int main(int argc, char *argv[])
 	
 	return 0;
 }
-
+int compute_Checksum(char * filename, char* digest){
+   char buffer[MD5_READ_SIZE+1];
+   md5_state_t ms;
+   md5_init(&ms);
+   int amt;
+   int fd = open(filename,0);
+   for(;;){
+      amt = (int) read(fd,buffer,MD5_READ_SIZE);
+      buffer[amt] = '\0';
+      if(amt == 0){
+         amt = md5_finish_text(&ms,digest,0);
+         digest[amt] = '\0';
+         return amt;
+      }
+      md5_append(&ms,(md5_byte_t *) buffer,amt);
+   }
+}
