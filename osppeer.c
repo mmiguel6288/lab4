@@ -361,8 +361,6 @@ static size_t read_tracker_response(task_t *t)
 		// If not, read more data.  Note that the read will not block
 		// unless NO data is available.
 		int ret = read_to_taskbuf(t->peer_fd, t);
-      printf("TAILPOS = %d\n", t->tail);
-      printf("PARTIAL RESPONSE = \n%s\n\n", t->buf);
 		if (ret == TBUF_ERROR)
 			die("tracker read error");
 		else if (ret == TBUF_END) {
@@ -536,9 +534,9 @@ task_t *start_download(task_t *tracker_task, const char *filename)
    large_buf[0] = '\0';
    l_bufsize = TASKBUFSIZ;
    messagepos = -1;
-   printf("\n--------------------------------\n"
-          "NEW SET\n"
-          "--------------------------------\n");
+
+   // Mutex because other threads may be talking to the tracker NOW
+	pthread_mutex_lock(&tracker_mutex);
 	osp2p_writef(tracker_task->peer_fd, "WANT %s\n", filename);
    while ((int)messagepos < 0) {
       written = strlen(large_buf);
@@ -551,8 +549,8 @@ task_t *start_download(task_t *tracker_task, const char *filename)
          }
       }
       strncat(large_buf, tracker_task->buf, strlen(tracker_task->buf));
-      printf("TOTAL SO FAR = \n%s\n\n", large_buf);
    }
+	pthread_mutex_unlock(&tracker_mutex);
    messagepos += written;
 
 	//TODO: Save checksum with command MD5SUM <file> to tracker
@@ -575,7 +573,6 @@ task_t *start_download(task_t *tracker_task, const char *filename)
    s1 = large_buf;
 	while ((s2 = memchr(s1, '\n', (large_buf + messagepos) - s1))) {
 		if (!(p = parse_peer(s1, s2 - s1))) {
-         //printf ("BUF = \n%s\n", large_buf);
 			die("osptracker responded to WANT command with unexpected format!\n");
       }        
 		p->next = t->peer_list;
@@ -665,7 +662,6 @@ static void task_download(task_t *t, task_t *tracker_task)
          error("* File too large");
          goto try_again;
       }
-      //printf("TOTAL WRITTEN = %d\n", t->total_written);
 
 		ret = write_from_taskbuf(t->disk_fd, t);
 		if (ret == TBUF_ERROR) {
@@ -682,9 +678,12 @@ static void task_download(task_t *t, task_t *tracker_task)
 		// and can serve it to others!  (But ignore tracker errors.)
 		//TODO: Compare downloaded file to saved checksum
 		if (strcmp(t->filename, t->disk_filename) == 0) {
+         // Mutex because other threads may be talking to the tracker NOW
+	      pthread_mutex_lock(&tracker_mutex);
 			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
 				     t->filename);
 			(void) read_tracker_response(tracker_task);
+	      pthread_mutex_unlock(&tracker_mutex);
 		}
 		task_free(t);
 		return;
@@ -743,7 +742,6 @@ static void task_upload(task_t *t)
 	assert(t->type == TASK_UPLOAD);
 	// First, read the request from the peer.
 	while (1) {
-      //printf("READING CONNECTION RPC\n");
 		int ret = read_to_taskbuf(t->peer_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Cannot read from connection");
@@ -1049,7 +1047,6 @@ int main(int argc, char *argv[])
 			memcpy(td->tracker_task,tracker_task,sizeof(task_t));
          /**/
          //td->tracker_task = start_tracker(tracker_addr, tracker_port);
-         td->tracker_task->peer_fd = tracker_task->peer_fd;
          td->t = t; 
 			do_task(td);
 		}

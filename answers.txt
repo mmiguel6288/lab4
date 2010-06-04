@@ -80,7 +80,19 @@ Email: mmiguel6288@gmail.com
    anything from the file descriptor, I simply timeout, return an error, and
    drop the connection.
 
-5) File Integrity
+5) Oversize RPCs (Popular Tracker Bug)
+
+      The popular tracker had trouble communicating with the original osppeer
+   because the RPC containing the peer list was much larger than TASKBUFSIZ,
+   which meant that the RPC would not fit into one task buffer at once. As
+   with the original osppeer, a call to read_tracker_response() on an oversized
+   RPC would result in a "premature" closed connection because a single task
+   buffer would not be able to hold the closing RPC tokens. We fixed this
+   by calling read_tracker_response() multiple times and reading the entire
+   oversized RPC into a dynamically allocated array.
+
+
+6) File Integrity
    
       See Extra Credit section.
 
@@ -95,3 +107,11 @@ Email: mmiguel6288@gmail.com
 # Add any other information you'd like us to know below this line.
 
 1) Performance issues regarding forking:
+
+      Everyone seems to say that using forking is a big performance hit.
+   Although we did not go this route, we originally planned to because we
+   did not see how forking could be significantly slower than, say, threads
+   if forking was normally done as fork-on-write. The whole reason people say
+   that forking is slower is because we have to copy ALL the program data to
+   a new process. But if we use fork-on-write, isn't this performance hit
+   mitigated?
